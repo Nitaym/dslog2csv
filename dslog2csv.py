@@ -15,6 +15,7 @@ import os
 import os.path
 import struct
 import csv
+import math
 import bitstring
 
 # Python 2 CSV writer wants binary output, but Py3 want regular
@@ -43,6 +44,7 @@ class DSLogParser():
         self.record_time_offset = 20.0
 
         self.read_header()
+
         return
 
     def read_records(self):
@@ -76,7 +78,9 @@ class DSLogParser():
             return None
 
         res = {'time': self.record_num * self.record_time_offset}
+
         res.update(self.parse_data_v3(data_bytes))
+
         res.update(self.parse_pdp_v3(pdp_bytes))
         self.record_num += 1
 
@@ -120,6 +124,24 @@ class DSLogParser():
 
         return res
 
+    def parse_bits_value(self, bytes, offset, size_in_bits):
+        # Which and how many bytes should we take
+        byte_align = math.floor(offset / 8)
+        size_align = math.ceil(size_in_bits / 8) #2   # This used to be `math.ceil(size_in_bits / 8)`, but for this module, we only us uints
+
+        # Which bits should we ignore
+        left_bitshift = offset - (byte_align * 8)
+        left_mask = 0xFFFF >> left_bitshift
+        right_bitshift = ((size_align * 8) - size_in_bits) - left_bitshift
+
+        relevant_bytes = bytes[byte_align: byte_align + size_align]
+
+        if size_align == 1:
+            bits_value = (struct.unpack('>B', relevant_bytes)[0] & left_mask) >> right_bitshift
+        else:
+            bits_value = (struct.unpack('>H', relevant_bytes)[0] & left_mask) >> right_bitshift
+        return bits_value
+
     def parse_pdp_v3(self, pdp_bytes):
         # from CD post https://www.chiefdelphi.com/forums/showpost.php?p=1556451&postcount=11
         # pdp_offsets = (8, 18, 28, 38, 52, 62, 72, 82, 92, 102, 116, 126, 136, 146, 156, 166)
@@ -127,19 +149,35 @@ class DSLogParser():
         # from DSLog-Reader
         # these make more sense in terms of defining a packing scheme, so stick with them
         # looks like this is a 64-bit int holding 6 10-bit numbers and they ignore the extra 4 bits
-        pdp_offsets = (8, 18, 28, 38, 48, 58,
-                       72, 82, 92, 102, 112, 122,
-                       136, 146, 156, 166)
-
-        bits = bitstring.Bits(bytes=pdp_bytes)
+        pdp_offsets = (
+            8,    # PDP 0
+            18,   # PDP 1
+            28,   # PDP 2
+            38,   # PDP 3
+            48,   # PDP 4
+            58,   # PDP 5
+            72,   # PDP 6
+            82,   # PDP 7
+            92,   # PDP 8
+            102,  # PDP 9
+            112,  # PDP 10
+            122,  # PDP 11
+            136,  # PDP 12
+            146,  # PDP 13
+            156,  # PDP 14
+            166,  # PDP 15
+        )
 
         vals = []
         for offset in pdp_offsets:
-            vals.append(self.shifted_float(bits[offset:offset+10].uint, 3))
+            bits_value = self.parse_bits_value(pdp_bytes, offset, 10)
+            val = self.shifted_float(bits_value, 3)
+            vals.append(val)
 
-        # values are 15 through 0, so reverse the list
-        # note: DSLog-Reader did not reverse these. Don't know who to believe.
-        vals.reverse()
+        # # values are 15 through 0, so reverse the list
+        # # note: DSLog-Reader did not reverse these. Don't know who to believe.
+        # # Nitay Megides: I've tested only one PDP - But it seems this is not inverted
+        # vals.reverse()
 
         total_i = 0.0
         for i in vals:
@@ -148,11 +186,11 @@ class DSLogParser():
         # the scaling on R, V and T are almost certainly not correct
         # need to find a reference for those values
         res = {
-            'pdp_id': bits[0:8].uint,
+            'pdp_id': self.parse_bits_value(pdp_bytes, 0, 8),
             'pdp_currents': vals,
-            'pdp_resistance': bits[176:184].uint,
-            'pdp_voltage': bits[184:192].uint,
-            'pdp_temp': bits[192:200].uint,
+            'pdp_resistance': self.parse_bits_value(pdp_bytes, 176, 8),
+            'pdp_voltage': self.parse_bits_value(pdp_bytes, 184, 8),
+            'pdp_temp': self.parse_bits_value(pdp_bytes, 192, 8),
             'pdp_total_current': total_i,
         }
 
